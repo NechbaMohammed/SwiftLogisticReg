@@ -1,206 +1,194 @@
-# Import of necessary libraries
+import numpy as np
 from numba import cuda
-import math as math
+import math
 
-# Vector-Matrix Multiplication Kernel
-@cuda.jit
-def vector_matrix_mul(v, m):
-    # Get thread index
-    start = cuda.grid(1)
-    stripe = cuda.gridsize(1)
-    # Check if thread index is within size of the vector
-    for i in range(start, v.shape[1], stripe):
-        # perform the dot product
-        for j in range(m.shape[1]):
-            m[i][j] = v[0][i] * m[i][j]
+class LogisticRegressionGPU:
+    def __init__(self, learning_rate=0.2, epsilon=2e-2, max_iter=1000):
+        self.learning_rate = learning_rate
+        self.epsilon = epsilon
+        self.max_iter = max_iter
+        self.w = None
 
-@cuda.jit
-def matrix_col_sum(m, result):
-    # Get thread index
-    start = cuda.grid(1)
-    stripe = cuda.gridsize(1)
-    # Check if thread index is within size of the vector
-    for j in range(start, m.shape[1], stripe):
-        # perform the dot product
-        result[0][j]=0
-        for i in range(m.shape[0]):
-             result[0][j]+= m[i][j]
+    def fit(self, X, y):
+        # Add bias to the input features
+        X = self.add_bias(X)
+        X = X.astype(float)
+        y = y.astype(float)
 
-# Sigmoid Function
-@cuda.jit
-def sigmoid(X, res):
-    """
-    w is a vector of shape (1, n)
-    X is a matrix of shape (m, n)
-    m is the number of examples
-    n is the number of features
-    """
-    # Get thread index
-    start = cuda.grid(1)
-    stripe = cuda.gridsize(1)
-    # Check if thread index is within size of the vector
-    for i in range(start, X.shape[0], stripe):
-          # perform the dot product
-          res[0][i]= 1/(1+math.exp(-res[0][i]))
+        # Set the size of the GPU thread blocks and the number of blocks needed
+        block_size = 1024
+        grid_size = (X.size + block_size - 1) // block_size
 
-# Element-wise vector subtraction function using CUDA
-@cuda.jit
-def substract(vec1, res2):
-  """
-  this fuction make an element wise substruction  i.e.  res2-vec1
+        # Initialize the weights of the logistic regression model
+        self.w = np.zeros(X.shape[1], dtype=float).reshape(1, X.shape[1])
+        self.w[0][0] = 1
 
-  vec1 and res2 are vectors of shape 1 m
-  m is the number of examples
+        # Transfer the data y and w to the GPU device
+        y_d = cuda.to_device(y)
+        w_d = cuda.to_device(self.w.copy())
 
-  the result of the substraction is stored in res2
-  """
-  # Get thread index
-  start = cuda.grid(1)
-  stripe = cuda.gridsize(1)
-  # Check if thread index is within size of the vector
-  for i in range(start, vec1.shape[1], stripe):
-    cuda.atomic.add(res2[0],i,-vec1[0][i])
+        grad_loss_d = cuda.to_device(self.w.copy())
 
-# CUDA function for computing L2 norm of a vector
-@cuda.jit
-def norm2(vec, res):
-  """
-  vec is a vector of shape (1, n)
-  """
-  # Get thread index
-  start = cuda.grid(1)
-  stripe = cuda.gridsize(1)
-  # Check if thread index is within size of the vector
-  for i in range(start, vec.shape[1], stripe):
-        # perform the dot product
-        cuda.atomic.add(res[0],0,vec[0][i]*vec[0][i])
+        for _ in range(self.max_iter):
+            # Forward pass
+            X_d1 = cuda.to_device(X.copy())
+            res = np.zeros(X.shape[0], dtype=float).reshape(1, X.shape[0])
+            res_d = cuda.to_device(res)
+            X2 = X_d1.T
 
-def add_bias(X):
-    """
-    Adds a column of 1's to the input feature matrix X, corresponding to the bias term.
+            self.vector_matrix_mul[grid_size, block_size](w_d, X2)
+            cuda.synchronize()
 
-    Args:
-    - X (numpy.ndarray): input feature matrix of shape (n_samples, n_features)
+            self.matrix_col_sum[grid_size, block_size](X2, res_d)
+            cuda.synchronize()
 
-    Returns:
-    - X_new (numpy.ndarray): feature matrix with an additional column of 1's of shape (n_samples, n_features+1)
-    """
+            self.sigmoid[grid_size, block_size](X_d1, res_d)
+            cuda.synchronize()
 
-    # Insert a column of 1's as the first column of X
-    X_new = np.insert(X, 0, 1, axis=1)
+            # Backward pass
+            self.substract[grid_size, block_size](y_d, res_d)
+            cuda.synchronize()
 
-    return X_new
+            X3 = cuda.to_device(X.copy())
+            self.vector_matrix_mul[grid_size, block_size](res_d, X3)
+            cuda.synchronize()
 
-# Logistic Regression on GPU using CUDA
-def logistic_regression( X, y, learning_rate, epsilon=1e-4):
-  """
-     X (the input features),
-     y (the labels),
-     learning_rate (the step size used during training),
-     epsilon (the minimum value of the gradient magnitude at which to stop training).
- """
-  # add bias to X
-  X = add_bias(X)
+            self.matrix_col_sum[grid_size, block_size](X3, grad_loss_d)
+            cuda.synchronize()
 
- # These lines set the size of the GPU thread blocks and the number of blocks needed based on the size of the input data X
-  block_size = 1024
-  grid_size = (X.size + block_size - 1) // block_size
+            # Update the weights using the gradient and the learning rate
+            grad_loss = grad_loss_d.copy_to_host() * (self.learning_rate * 1. / X.shape[0])
+            grad_loss_d = cuda.to_device(grad_loss)
 
-  # This initializes the weights of the logistic regression model to zeros, with the first weight set to 1 this correspond to bais.
-  w = np.zeros(X.shape[1],dtype=float).reshape(1,X.shape[1])
-  w[0][0]=1
-  # These lines transfer the data y and w to the GPU device.
-  y_d = cuda.to_device(y)
-  w_d =  cuda.to_device(w)
+            self.substract[grid_size, block_size](grad_loss_d, w_d)
+            cuda.synchronize()
 
+            # Calculate the magnitude of the gradient vector using the L2 norm
+            grad_norm = np.array([[0]], dtype=float)
+            grad_norm_d = cuda.to_device(grad_norm)
+            self.norm2[grid_size, block_size](grad_loss_d, grad_norm_d)
+            cuda.synchronize()
 
+            # Check whether the gradient magnitude is smaller than the epsilon threshold
+            grad_norm = grad_norm_d.copy_to_host()
 
-  grad_loss_d = cuda.to_device(w.copy())
+            if math.sqrt(grad_norm[0][0]) <= self.epsilon or np.linalg.norm(self.w - w_d.copy_to_host()) <= self.epsilon:
+                break
 
-  while True:
-    w = w_d.copy_to_host()
-    X_d1 = cuda.to_device(X.copy())
-    res =np.zeros(X.shape[0],dtype=float).reshape(1,X.shape[0])
-    res_d = cuda.to_device(res)
-    X2 =  X_d1.T
+        self.w = w_d.copy_to_host()
 
-    vector_matrix_mul[grid_size, block_size](w_d, X2)
-    cuda.synchronize()
+    def predict(self, X):
+        """
+        Predicts the labels for a given set of data using the trained logistic regression weights.
 
-    matrix_col_sum[grid_size, block_size](X2, res_d)
-    cuda.synchronize()
+        Args:
+        X: numpy array, shape (m, n), input data
 
-    sigmoid[grid_size, block_size](X_d1,res_d)
-    cuda.synchronize()
+        Returns:
+        predictions: numpy array, shape (m,), predicted labels
+        """
+        # Add bias to x
+        X = self.add_bias(X)
 
-    substract[grid_size, block_size](y_d,res_d)
-    cuda.synchronize()
+        # These lines set the size of the GPU thread blocks and the number of blocks needed based on the size of the input data X
+        block_size = 200
+        grid_size = (X.size + block_size - 1) // block_size
 
+        X_d = cuda.to_device(X)
+        w_d = cuda.to_device(self.w)
+        res = np.zeros(X.shape[0], dtype=float).reshape(1, X.shape[0])
+        res_d = cuda.to_device(res)
+        X2 = X_d.T
 
-    X3 = cuda.to_device(X.copy())
-    X3 = X3
-    vector_matrix_mul[grid_size, block_size](res_d, X3)
-    cuda.synchronize()
+        self.vector_matrix_mul[grid_size, block_size](w_d, X2)
+        cuda.synchronize()
 
-    matrix_col_sum[grid_size, block_size](X3, grad_loss_d)
-    cuda.synchronize()
+        self.matrix_col_sum[grid_size, block_size](X2, res_d)
+        cuda.synchronize()
 
-    # This updates the weights using the gradient and the learning rate
-    grad_loss= grad_loss_d.copy_to_host()* (learning_rate/X.shape[0])
-    grad_loss_d =  cuda.to_device(grad_loss)
+        self.sigmoid[grid_size, block_size](X_d, res_d)
+        cuda.synchronize()
 
-    substract[grid_size, block_size](grad_loss_d,w_d)
-    cuda.synchronize()
+        # Round the predictions to the nearest integer (0 or 1)
+        predictions = np.round(res_d.copy_to_host())
 
+        return predictions
 
+    @staticmethod
+    @cuda.jit
+    def vector_matrix_mul(v, m):
+        # Get thread index
+        start = cuda.grid(1)
+        stripe = cuda.gridsize(1)
+        # Check if thread index is within size of the vector
+        for i in range(start, v.shape[1], stripe):
+            # perform the dot product
+            for j in range(m.shape[1]):
+                m[i][j] = v[0][i] * m[i][j]
 
-    # This calculates the magnitude of the gradient vector using the L2 norm
-    grad_norm  = np.array([[0]],dtype=float)
-    grad_norm_d = cuda.to_device(grad_norm)
-    norm2[grid_size, block_size](grad_loss_d,grad_norm_d)
-    cuda.synchronize()
+    @staticmethod
+    @cuda.jit
+    def matrix_col_sum(m, result):
+        # Get thread index
+        start = cuda.grid(1)
+        stripe = cuda.gridsize(1)
+        # Check if thread index is within size of the vector
+        for j in range(start, m.shape[1], stripe):
+            # perform the dot product
+            result[0][j] = 0
+            for i in range(m.shape[0]):
+                result[0][j] += m[i][j]
 
-    # This checks whether the gradient magnitude is smaller than the epsilon threshold. If so, the function returns the final weight vector. If not, the training loop continues.
-    grad_norm = grad_norm_d.copy_to_host()
+    @staticmethod
+    @cuda.jit
+    def sigmoid(X, res):
+        """
+        w is a vector of shape (1, n)
+        X is a matrix of shape (m, n)
+        m is the number of examples
+        n is the number of features
+        """
+        # Get thread index
+        start = cuda.grid(1)
+        stripe = cuda.gridsize(1)
+        # Check if thread index is within size of the vector
+        for i in range(start, X.shape[0], stripe):
+              # perform the dot product
+              res[0][i] = 1 / (1 + math.exp(-res[0][i]))
 
-  
-    if math.sqrt(grad_norm[0][0])<= epsilon or np.linalg.norm(w-w_d.copy_to_host())<=epsilon :
-      return  w_d.copy_to_host()
+    @staticmethod
+    @cuda.jit
+    def substract(vec1, res2):
+        """
+        this function makes an element-wise subtraction, i.e., res2 - vec1
 
-def predict(X, w):
-    """
-    Predicts the labels for a given set of data using the trained logistic regression weights.
+        vec1 and res2 are vectors of shape (1, m)
+        m is the number of examples
 
-    Args:
-    X: numpy array, shape (m, n), input data
-    w: numpy array, shape (1, n), learned logistic regression weights
+        the result of the subtraction is stored in res2
+        """
+        # Get thread index
+        start = cuda.grid(1)
+        stripe = cuda.gridsize(1)
+        # Check if thread index is within size of the vector
+        for i in range(start, vec1.shape[1], stripe):
+            cuda.atomic.add(res2[0], i, -vec1[0][i])
 
-    Returns:
-    predictions: numpy array, shape (m,), predicted labels
-    """
-    # add bais to x
-    X = add_bias(X)
+    @staticmethod
+    @cuda.jit
+    def norm2(vec, res):
+        """
+        vec is a vector of shape (1, n)
+        """
+        # Get thread index
+        start = cuda.grid(1)
+        stripe = cuda.gridsize(1)
+        # Check if thread index is within size of the vector
+        for i in range(start, vec.shape[1], stripe):
+            # perform the dot product
+            cuda.atomic.add(res[0], 0, vec[0][i] * vec[0][i])
 
-    # These lines set the size of the GPU thread blocks and the number of blocks needed based on the size of the input data X
-    block_size = 200
-    grid_size = (X.size + block_size - 1) // block_size
+    @staticmethod
+    def add_bias(X):
+        return np.hstack((np.ones((X.shape[0], 1)), X))
 
-    X_d = cuda.to_device(X)
-    w_d = cuda.to_device(w)
-    res =np.zeros(X.shape[0],dtype=float).reshape(1,X.shape[0])
-    res_d = cuda.to_device(res)
-    X2 =  X_d.T
-
-    vector_matrix_mul[grid_size, block_size](w_d, X2)
-    cuda.synchronize()
-
-    matrix_col_sum[grid_size, block_size](X2, res_d)
-    cuda.synchronize()
-
-    sigmoid[grid_size, block_size](X_d,res_d)
-    cuda.synchronize()
-
-    # Round the predictions to the nearest integer (0 or 1)
-    predictions = np.round(res_d.copy_to_host())
-
-    return predictions
