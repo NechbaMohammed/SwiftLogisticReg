@@ -1,0 +1,11 @@
+LICENSE
+README.md
+setup.py
+fastlogistic/__init__.py
+fastlogistic/logistic_cpu.py
+fastlogistic/logistic_gpu.py
+fastlogistic.egg-info/PKG-INFO
+fastlogistic.egg-info/SOURCES.txt
+fastlogistic.egg-info/dependency_links.txt
+fastlogistic.egg-info/not-zip-safe
+fastlogistic.egg-info/top_level.txt
