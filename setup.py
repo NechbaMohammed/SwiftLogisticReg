@@ -3,16 +3,16 @@ from setuptools import setup
 from pathlib import Path
 
 # read the contents of your README file
-this_directory = Path(__file__).parent
-long_description = (this_directory / "README.md").read_text()
+with open("README.md", "r") as fh:
+    long_description = fh.read()
 
-setup(name = "fastlogistic",
+setup(name = "fastlogreg",
    version = "0.0.1",
      author = "Nechba Mohammed, Mouhajir Mohamed, and Sedjari Yassine",
 description = "Efficient logistic regression in Python with GPU support",
 long_description =  long_description,
 long_description_content_type = "text/markdown",
-url = "https://github.com/NechbaMohammed/fastlogistic",
+url = "https://github.com/NechbaMohammed/fastlogreg",
 author_email = "mohammednechba@gmail.com",
-       packages=['fastlogistic'],
+       packages=['fastlogreg'],
         zip_safe = False)
